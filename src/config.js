@@ -27,7 +27,7 @@ const config = {
 
   autoJoinDelayMs: (parseInt(process.env.AUTO_JOIN_DELAY_SECONDS, 10) || 30) * 1000,
   defaultVolume: parseInt(process.env.DEFAULT_VOLUME, 10) || 100,
-  shufflePlaylist: (process.env.SHUFFLE_PLAYLIST || 'false').toLowerCase() === 'true',
+  shufflePlaylist: "true",
   commandPrefix: process.env.COMMAND_PREFIX || '!',
 
   port: process.env.PORT || 3000,
