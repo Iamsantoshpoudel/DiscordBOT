@@ -1,0 +1,36 @@
+services:
+  - type: worker
+    name: discord-b2-music-bot
+    runtime: node
+    plan: starter # free background workers are not reliable for 24/7 bots — see README
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: CLIENT_ID
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: MUSIC_VOICE_CHANNEL_ID
+        sync: false
+      - key: BOT_TEXT_CHANNEL_ID
+        sync: false
+      - key: B2_ENDPOINT
+        sync: false
+      - key: B2_REGION
+        sync: false
+      - key: B2_KEY_ID
+        sync: false
+      - key: B2_APPLICATION_KEY
+        sync: false
+      - key: B2_BUCKET_NAME
+        sync: false
+      - key: B2_PREFIX
+        sync: false
+      - key: AUTO_JOIN_DELAY_SECONDS
+        value: "30"
+      - key: DEFAULT_VOLUME
+        value: "100"
+      - key: SHUFFLE_PLAYLIST
+        value: "false"
