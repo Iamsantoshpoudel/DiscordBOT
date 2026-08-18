@@ -33,4 +33,4 @@ services:
       - key: DEFAULT_VOLUME
         value: "100"
       - key: SHUFFLE_PLAYLIST
-        value: "false"
+        value: "true"
