@@ -17,6 +17,6 @@ module.exports = {
       return interaction.reply({ content: 'No previous track in history.', ephemeral: true });
     }
 
-    return interaction.reply(`⏮️ Now playing: **${track.title}**`);
+    return interaction.reply({ content: `⏮️ Now playing: **${track.title}**`, allowedMentions: { parse: [] } });
   },
 };

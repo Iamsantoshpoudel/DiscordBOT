@@ -32,7 +32,7 @@ class TextContext {
   async reply(payload) {
     if (typeof payload === 'string') payload = { content: payload };
     if (payload.ephemeral) {
-      payload = { content: payload.content, embeds: payload.embeds };
+      payload = { content: payload.content, embeds: payload.embeds, allowedMentions: payload.allowedMentions };
     }
     this.replied = true;
     return this._message.reply(payload);

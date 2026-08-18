@@ -17,12 +17,15 @@ module.exports = {
     setTimeout(async () => {
       const track = session.currentTrack;
       try {
-        await interaction.followUp(track ? `⏭️ Skipped. Now playing: **${track.title}**` : '⏭️ Skipped.');
+        await interaction.followUp({
+          content: track ? `⏭️ Skipped. Now playing: **${track.title}**` : '⏭️ Skipped.',
+          allowedMentions: { parse: [] },
+        });
       } catch (e) {
         // interaction may have expired, ignore
       }
     }, 700);
 
-    return interaction.reply('⏭️ Skipping...');
+    return interaction.reply({ content: '⏭️ Skipping...', allowedMentions: { parse: [] } });
   },
 };

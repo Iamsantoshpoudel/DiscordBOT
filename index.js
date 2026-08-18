@@ -12,6 +12,21 @@ const { deployGuildCommands } = require('./src/utils/deployCommands');
 const { getInviteUrl } = require('./src/utils/permissions');
 const b2 = require('./src/utils/b2Client');
 
+// ---- Global error handling ----
+// Without these, an unhandled rejection anywhere (a stray B2/network promise,
+// a Discord API hiccup, etc.) can silently kill the whole bot process on some
+// Node versions, or leave it in a half-broken state on others. Log loudly and
+// keep running; only truly fatal, unrecoverable errors bring the process down
+// (and even then, exit non-zero so the host restarts it cleanly).
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] Unhandled promise rejection:', reason instanceof Error ? reason.stack : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[fatal] Uncaught exception:', err.stack || err.message);
+  // Give logs a tick to flush, then let the process manager (Render, pm2, etc.) restart us.
+  setTimeout(() => process.exit(1), 250);
+});
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -78,8 +93,17 @@ app.listen(config.port, () => {
 });
 
 // ---- Graceful shutdown ----
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down...');
+function shutdown(signal) {
+  console.log(`${signal} received, shutting down...`);
+  try {
+    for (const session of manager.sessions.values()) {
+      session.destroy(); // stops playback and closes ffmpeg/B2 streams cleanly
+    }
+  } catch (err) {
+    console.error('[shutdown] Error while cleaning up sessions:', err.message);
+  }
   client.destroy();
   process.exit(0);
-});
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

@@ -34,14 +34,23 @@ module.exports = {
 
       if (session.isPlaying) {
         const track = session.currentTrack;
-        return interaction.editReply(`Already playing: **${track ? track.title : 'unknown'}**`);
+        return interaction.editReply({
+          content: `Already playing: **${track ? track.title : 'unknown'}**`,
+          allowedMentions: { parse: [] }, // titles come from filenames in B2; never let them ping anyone
+        });
       }
 
       const track = await session.playFromStart();
-      return interaction.editReply(`🎶 Now playing: **${track.title}**`);
+      return interaction.editReply({
+        content: `🎶 Now playing: **${track.title}**`,
+        allowedMentions: { parse: [] },
+      });
     } catch (err) {
-      console.error('[play]', err);
-      return interaction.editReply(`❌ Couldn't start playback: ${err.message}`);
+      console.error('[play]', err.message);
+      return interaction.editReply({
+        content: `❌ Couldn't start playback: ${err.message}`,
+        allowedMentions: { parse: [] },
+      });
     }
   },
 };
