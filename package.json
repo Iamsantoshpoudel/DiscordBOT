@@ -11,7 +11,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "deploy-commands": "node src/deploy-commands.js",
-    "lint:syntax": "find src -name '*.js' -print0 | xargs -0 -n1 node --check"
+    "lint:syntax": "node scripts/check-syntax.js"
   },
   "dependencies": {
     "@discordjs/voice": "^0.19.2",

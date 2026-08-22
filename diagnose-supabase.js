@@ -48,7 +48,7 @@ async function main() {
   if (!SERVICE_KEY) {
     fail('SUPABASE_SERVICE_ROLE_KEY', 'not set in .env.');
   }
-  ok('SUPABASE_SERVICE_ROLE_KEY is set', `${SERVICE_KEY.slice(0, 6)}...${SERVICE_KEY.slice(-4)}`);
+  ok('SUPABASE_SERVICE_ROLE_KEY is set (value not printed)');
 
   // 2. Can we resolve the hostname at all? (Rules out DNS/internet issues.)
   try {

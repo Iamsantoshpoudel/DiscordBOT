@@ -15,6 +15,10 @@ A production-ready Discord music bot that streams audio **directly from Supabase
 - **Security** — permission checks on every command, role or voice-channel-membership gating, input sanitization, cooldowns, snowflake validation
 - **Structured JSON logging** — every join/leave, command invocation, bot action, and error is logged with consistent fields
 - **Global error handling** — per-command try/catch, per-event try/catch, and a top-level process safety net so one failure can't crash the bot
+- **Self-healing** — 3 consecutive failures of the same subsystem trigger a controlled exit (code `2`) so Render/PM2 can restart a clean process
+- **Health / metrics** — heartbeat file plus optional `GET /health` and `GET /metrics`
+
+See [PRODUCTION_CHECKLIST.md](./PRODUCTION_CHECKLIST.md) for process-manager setup, RLS, Discord invite scopes, and restart behavior.
 
 ## Project structure
 
@@ -97,7 +101,16 @@ Set `DISCORD_DEV_GUILD_ID` in `.env` during development — guild-scoped command
 3. Add all env vars from `.env.example` in the Render dashboard.
 4. Deploy.
 
-Background Workers don't need a public port. If you instead deploy as a **Web Service**, Render will inject `PORT` automatically and the bot starts a minimal `/` health-check endpoint to satisfy Render's port-binding requirement — no extra config needed.
+**Docker (VPS):**
+
+```bash
+docker build -t discord-music-bot .
+docker run --env-file .env --restart unless-stopped --name discord-music-bot discord-music-bot
+```
+
+Do not also run PM2 inside that container. See [PRODUCTION_CHECKLIST.md](./PRODUCTION_CHECKLIST.md).
+
+Background Workers don't need a public port. If you instead deploy as a **Web Service**, Render will inject `PORT` automatically and the bot starts `GET /health` (liveness), `GET /ready` (Discord session), and `GET /metrics`. Point platform health checks at `/health`, not `/ready`.
 
 ## Configuration reference
 

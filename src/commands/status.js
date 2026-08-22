@@ -2,6 +2,7 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const { infoEmbed } = require('../utils/embeds');
+const { escapeMarkdown } = require('../utils/sanitize');
 
 function formatDuration(ms) {
   const totalSeconds = Math.floor(ms / 1000);
@@ -32,7 +33,7 @@ module.exports = {
     if (queue.nowPlaying) {
       const elapsed = queue.startedAt ? formatDuration(Date.now() - queue.startedAt) : '0:00';
       lines.unshift(
-        `**Now Playing:** ${queue.nowPlaying.song.title} — *${queue.nowPlaying.song.artist}* (${elapsed} elapsed)`,
+        `**Now Playing:** ${escapeMarkdown(queue.nowPlaying.song.title)} — *${escapeMarkdown(queue.nowPlaying.song.artist)}* (${elapsed} elapsed)`,
       );
     } else {
       lines.unshift('**Now Playing:** Nothing');

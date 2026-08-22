@@ -2,6 +2,7 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed } = require('../utils/embeds');
+const { escapeMarkdown } = require('../utils/sanitize');
 
 module.exports = {
   requiresVoiceMembership: true,
@@ -24,7 +25,7 @@ module.exports = {
     const ok = ctx.playbackService.resume(interaction.guild.id);
     await interaction.reply({
       embeds: ok
-        ? [successEmbed('Resumed', `**${queue.nowPlaying.song.title}** is playing again.`)]
+        ? [successEmbed('Resumed', `**${escapeMarkdown(queue.nowPlaying.song.title)}** is playing again.`)]
         : [errorEmbed('Could not resume', 'Something went wrong resuming playback.')],
     });
   },

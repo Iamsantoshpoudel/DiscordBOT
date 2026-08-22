@@ -2,8 +2,9 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const supabaseService = require('../services/supabaseService');
-const { sanitizeSearchQuery } = require('../utils/sanitize');
+const { sanitizeSearchQuery, escapeMarkdown } = require('../utils/sanitize');
 const { successEmbed, errorEmbed } = require('../utils/embeds');
+const config = require('../config/config');
 
 module.exports = {
   requiresVoiceMembership: true,
@@ -26,18 +27,24 @@ module.exports = {
       const results = await supabaseService.searchSongs(query);
 
       if (results.length === 0) {
-        await interaction.editReply({ embeds: [errorEmbed('No matches found', `Nothing in the library matches "${query}".`)] });
+        await interaction.editReply({ embeds: [errorEmbed('No matches found', `Nothing in the library matches "${escapeMarkdown(query)}".`)] });
         return;
       }
 
       const song = results[0];
       const queue = ctx.queueManager.getOrCreate(guild.id);
-      queue.playNext(song, member.id);
+      const queued = queue.playNext(song, member.id);
+      if (!queued) {
+        await interaction.editReply({
+          embeds: [errorEmbed('Queue full', `The queue is at its maximum of ${config.playback.maxQueueLength} tracks.`)],
+        });
+        return;
+      }
 
       await ctx.playbackService.start(guild);
 
       await interaction.editReply({
-        embeds: [successEmbed('Queued', `**${song.title}** by *${song.artist}* will play next.`)],
+        embeds: [successEmbed('Queued', `**${escapeMarkdown(song.title)}** by *${escapeMarkdown(song.artist)}* will play next.`)],
       });
       return;
     }
@@ -47,7 +54,7 @@ module.exports = {
 
     if (queue?.nowPlaying) {
       await interaction.editReply({
-        embeds: [successEmbed('Now Playing', `**${queue.nowPlaying.song.title}** by *${queue.nowPlaying.song.artist}*`)],
+        embeds: [successEmbed('Now Playing', `**${escapeMarkdown(queue.nowPlaying.song.title)}** by *${escapeMarkdown(queue.nowPlaying.song.artist)}*`)],
       });
     } else {
       await interaction.editReply({ embeds: [errorEmbed('Nothing to play', 'The music library appears to be empty.')] });

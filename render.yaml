@@ -41,6 +41,18 @@ services:
         value: "3600"
       - key: LIBRARY_SYNC_INTERVAL_MS
         value: "120000"
+      - key: MAX_QUEUE_LENGTH
+        value: "200"
+      - key: MAX_VOICE_CONNECTIONS
+        value: "5"
+      - key: MAX_FILE_SIZE_BYTES
+        value: "52428800"
+      - key: MAX_CONSECUTIVE_TRACK_FAILURES
+        value: "5"
+      - key: GUILD_COMMAND_COOLDOWN_MS
+        value: "1000"
+      - key: LOG_FORMAT
+        value: json
       - key: LOG_LEVEL
         value: info
       - key: NODE_ENV

@@ -31,7 +31,8 @@ class CooldownManager {
 
   /**
    * Checks whether the user may run the command right now. If allowed, this
-   * also starts the cooldown window.
+   * also starts the cooldown window. Also enforces a per-guild ceiling so a
+   * coordinated group of users cannot hammer skip/play and exhaust API quotas.
    * @param {string} guildId
    * @param {string} userId
    * @param {string} commandName
@@ -39,8 +40,16 @@ class CooldownManager {
    * @returns {{ allowed: true } | { allowed: false, retryAfterMs: number }}
    */
   consume(guildId, userId, commandName, cooldownMs = this.defaultCooldownMs) {
-    const key = this._key(guildId, userId, commandName);
     const now = Date.now();
+
+    const guildKey = `guild:${guildId}:${commandName}`;
+    const guildExpiry = this.timestamps.get(guildKey);
+    const guildCooldownMs = config.playback.guildCommandCooldownMs;
+    if (guildExpiry && guildExpiry > now) {
+      return { allowed: false, retryAfterMs: guildExpiry - now };
+    }
+
+    const key = this._key(guildId, userId, commandName);
     const expiry = this.timestamps.get(key);
 
     if (expiry && expiry > now) {
@@ -48,7 +57,15 @@ class CooldownManager {
     }
 
     this.timestamps.set(key, now + cooldownMs);
+    this.timestamps.set(guildKey, now + guildCooldownMs);
     return { allowed: true };
+  }
+
+  stop() {
+    if (this._sweepInterval) {
+      clearInterval(this._sweepInterval);
+      this._sweepInterval = null;
+    }
   }
 }
 

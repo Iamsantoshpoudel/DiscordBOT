@@ -2,6 +2,7 @@
 
 const { Events, ActivityType } = require('discord.js');
 const logger = require('../utils/logger').child('events:ready');
+const queueSnapshot = require('../utils/queueSnapshot');
 
 module.exports = {
   name: Events.ClientReady,
@@ -20,11 +21,17 @@ module.exports = {
       logger.warn('presence_update_failed', { error: err.message });
     }
 
-    // Reconcile auto-join/auto-leave state for every guild in case humans
-    // are already sitting in the voice channel when the bot (re)starts.
+    // Reconcile auto-join/auto-leave from the voice-state cache (GuildVoiceStates
+    // intent). Do not fetch the full member list — that needs the privileged
+    // Guild Members intent this bot does not request.
+    try {
+      queueSnapshot.restore(ctx.queueManager);
+    } catch (err) {
+      logger.warn('queue_snapshot_restore_skipped', { error: err.message });
+    }
+
     for (const guild of client.guilds.cache.values()) {
       try {
-        await guild.members.fetch({ withPresences: false }).catch(() => {});
         ctx.autoJoinLeaveManager.reconcile(guild);
       } catch (err) {
         logger.error('startup_reconcile_failed', err, { guildId: guild.id });

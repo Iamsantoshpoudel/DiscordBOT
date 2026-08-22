@@ -2,6 +2,7 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed } = require('../utils/embeds');
+const { escapeMarkdown } = require('../utils/sanitize');
 
 module.exports = {
   requiresVoiceMembership: true,
@@ -21,7 +22,7 @@ module.exports = {
 
     await interaction.reply({
       embeds: ok
-        ? [successEmbed('Skipped', `Skipped **${skippedTitle}**.`)]
+        ? [successEmbed('Skipped', `Skipped **${escapeMarkdown(skippedTitle)}**.`)]
         : [errorEmbed('Could not skip', 'Something went wrong skipping the track.')],
     });
   },

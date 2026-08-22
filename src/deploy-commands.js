@@ -4,6 +4,7 @@ const { REST, Routes } = require('discord.js');
 const config = require('./config/config');
 const { loadCommands } = require('./commands');
 const logger = require('./utils/logger').child('deployCommands');
+const { retry } = require('./utils/retry');
 
 async function main() {
   const commands = loadCommands();
@@ -16,7 +17,13 @@ async function main() {
       ? Routes.applicationGuildCommands(config.discord.clientId, config.discord.devGuildId)
       : Routes.applicationCommands(config.discord.clientId);
 
-    const result = await rest.put(route, { body });
+    const result = await retry(() => rest.put(route, { body }), {
+      retries: 2,
+      baseDelayMs: 1000,
+      onRetry: (err, attempt, delayMs) => {
+        logger.warn('command_registration_retry', { attempt, delayMs, error: err.message });
+      },
+    });
 
     logger.info('commands_registered', {
       count: result.length,
@@ -28,4 +35,7 @@ async function main() {
   }
 }
 
-main();
+main().catch((err) => {
+  logger.error('command_registration_failed', err);
+  process.exitCode = 1;
+});

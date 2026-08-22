@@ -5,6 +5,9 @@ const cooldownManager = require('../utils/cooldown');
 const { checkMemberAuthorized, checkBotVoicePermissions } = require('../utils/permissions');
 const { errorEmbed } = require('../utils/embeds');
 const logger = require('../utils/logger').child('events:interactionCreate');
+const { isAcceptingCommands } = require('../utils/health');
+const { inc } = require('../utils/metrics');
+const supervisor = require('../utils/supervisor');
 
 module.exports = {
   name: Events.InteractionCreate,
@@ -13,6 +16,13 @@ module.exports = {
   /** @param {import('discord.js').Interaction} interaction @param {import('../types').CommandContext} ctx */
   async execute(interaction, ctx) {
     if (!interaction.isChatInputCommand()) return;
+    if (!isAcceptingCommands()) {
+      await safeReply(interaction, {
+        embeds: [errorEmbed('Restarting', 'The bot is shutting down for a restart. Please try again in a few seconds.')],
+        ephemeral: true,
+      });
+      return;
+    }
     if (!interaction.inGuild()) {
       await safeReply(interaction, { embeds: [errorEmbed('Guild only', 'This bot only works inside a server.')] });
       return;
@@ -64,12 +74,24 @@ module.exports = {
     // crash the process or affect other guilds/interactions. -------------
     logger.info('command_invoked', log);
     const startedAt = Date.now();
+    inc('commands');
 
     try {
       await command.execute(interaction, ctx);
       logger.info('command_completed', { ...log, durationMs: Date.now() - startedAt });
+      supervisor.reportSuccess('command_dispatch');
     } catch (err) {
+      inc('commandErrors');
+      if (err && typeof err === 'object') {
+        err.commandName = log.commandName;
+        err.userId = log.userId;
+        err.guildId = log.guildId;
+      }
       logger.error('command_failed', err, { ...log, durationMs: Date.now() - startedAt });
+      const discordCode = err?.code;
+      if (discordCode !== 10062 && discordCode !== 40060) {
+        supervisor.reportFailure('command_dispatch', err, log);
+      }
       await safeReply(interaction, {
         embeds: [errorEmbed('Something went wrong', 'An unexpected error occurred while running that command. It has been logged.')],
         ephemeral: true,

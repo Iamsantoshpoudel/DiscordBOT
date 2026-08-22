@@ -1,0 +1,11 @@
+node_modules
+.git
+.env
+.env.*
+!.env.example
+logs
+*.log
+.DS_Store
+.idea
+.vscode
+diagnose-supabase.js

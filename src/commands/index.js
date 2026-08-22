@@ -23,6 +23,9 @@ function loadCommands() {
         logger.warn('invalid_command_module', { file });
         continue;
       }
+      if (typeof command.data.setDMPermission === 'function') {
+        command.data.setDMPermission(false);
+      }
       commands.set(command.data.name, command);
     } catch (err) {
       logger.error('command_load_failed', err, { file });

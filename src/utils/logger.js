@@ -1,33 +1,56 @@
 'use strict';
 
+const fs = require('node:fs');
+const path = require('node:path');
 const pino = require('pino');
+const pretty = require('pino-pretty');
 const config = require('../config/config');
+const { redactSecrets } = require('./sanitize');
 
 const useFriendlyFormat = config.ops.logFormat !== 'json';
 
-/**
- * Root logger. By default this prints short, plain-English lines to the
- * console (e.g. "Now playing: Song Title — Artist"), which is what you see
- * when running the bot locally or watching Render's log tab. Set
- * LOG_FORMAT=json in your .env if you want raw structured JSON logs
- * instead (useful for feeding into a log aggregator/dashboard).
- */
-const baseLogger = pino({
-  level: config.ops.logLevel,
-  base: undefined, // no pid/hostname clutter in the friendly format
-  timestamp: pino.stdTimeFunctions.isoTime,
-  transport: useFriendlyFormat
-    ? {
-        target: 'pino-pretty',
-        options: {
+fs.mkdirSync(config.ops.logDir, { recursive: true });
+
+const fileDest = pino.destination({
+  dest: path.join(config.ops.logDir, 'bot.log'),
+  mkdir: true,
+  sync: false,
+});
+
+const streams = [
+  {
+    level: config.ops.logLevel,
+    stream: useFriendlyFormat
+      ? pretty({
           colorize: true,
           translateTime: 'HH:MM:ss',
           ignore: 'pid,hostname,event,module',
           singleLine: true,
-        },
-      }
-    : undefined,
-});
+        })
+      : process.stdout,
+  },
+  {
+    level: config.ops.logLevel,
+    stream: fileDest,
+  },
+];
+
+/**
+ * Root logger. Console uses a short friendly format by default; `logs/bot.log`
+ * always receives structured JSON (timestamp, event, guild/user context, stack).
+ */
+const baseLogger = pino(
+  {
+    level: config.ops.logLevel,
+    base: { pid: process.pid },
+    timestamp: pino.stdTimeFunctions.isoTime,
+    redact: {
+      paths: ['token', 'access_token', 'signedUrl', 'authorization', '*.token', '*.serviceRoleKey'],
+      censor: '[redacted]',
+    },
+  },
+  pino.multistream(streams),
+);
 
 /**
  * Turns a snake_case event code into a plain-English sentence fragment,
@@ -72,16 +95,52 @@ class Logger {
    * @param {string} [message]
    */
   error(event, err, meta = {}, message) {
-    const errPayload =
-      err instanceof Error
-        ? { message: err.message, stack: err.stack, name: err.name }
-        : { message: String(err) };
+    const errPayload = this._errPayload(err);
     this.pino.error({ event, err: errPayload, ...meta }, message || `${humanize(event)}: ${errPayload.message}`);
+  }
+
+  _errPayload(err) {
+    if (err instanceof Error) {
+      return {
+        message: redactSecrets(err.message),
+        stack: redactSecrets(err.stack || ''),
+        name: err.name,
+        code: err.code,
+      };
+    }
+    return { message: redactSecrets(String(err)) };
+  }
+
+  /**
+   * Highest severity — restart loops, exhausted retries, uncaught exceptions.
+   * @param {string} event
+   * @param {Error|unknown} err
+   * @param {object} [meta]
+   * @param {string} [message]
+   */
+  critical(event, err, meta = {}, message) {
+    const errPayload = this._errPayload(err);
+    this.pino.fatal(
+      { event, levelName: 'critical', err: errPayload, ...meta },
+      message || `${humanize(event)}: ${errPayload.message}`,
+    );
   }
 
   /** @param {string} event @param {object} [meta] @param {string} [message] */
   debug(event, meta = {}, message) {
     this.pino.debug({ event, ...meta }, message || humanize(event));
+  }
+
+  flush() {
+    return new Promise((resolve) => {
+      try {
+        this.pino.flush();
+        if (typeof fileDest.flushSync === 'function') fileDest.flushSync();
+      } catch {
+        /* ignore */
+      }
+      setTimeout(resolve, 50);
+    });
   }
 
   /**

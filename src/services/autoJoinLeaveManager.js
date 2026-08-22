@@ -2,6 +2,8 @@
 
 const config = require('../config/config');
 const logger = require('../utils/logger').child('autoJoinLeaveManager');
+const { isAcceptingCommands } = require('../utils/health');
+const { PermanentError } = require('../utils/retry');
 
 /**
  * Counts non-bot members currently in the configured voice channel.
@@ -49,18 +51,13 @@ class AutoJoinLeaveManager {
     const botConnected = !!queue.connection;
 
     if (humanCount > 0) {
-      // A human is present: cancel any pending auto-leave, and start
-      // auto-join only if the bot isn't connected AND no join timer is
-      // already pending (this is what prevents a second timer).
       queue.clearAutoLeaveTimer();
 
       if (!botConnected && !queue.autoJoinTimer) {
         this._scheduleAutoJoin(guild, queue);
       }
     } else {
-      // Channel is empty of humans: cancel any pending auto-join (nobody
-      // to play for), and start auto-leave only if the bot is connected
-      // and no leave timer is already pending.
+      queue.autoJoinAttempts = 0;
       queue.clearAutoJoinTimer();
 
       if (botConnected && !queue.autoLeaveTimer) {
@@ -70,11 +67,24 @@ class AutoJoinLeaveManager {
   }
 
   /**
+   * After an unrecoverable voice drop, rejoin quickly if humans are still there
+   * instead of waiting for another voiceStateUpdate (which may never come).
+   * @param {import('discord.js').Guild} guild
+   */
+  scheduleRejoin(guild) {
+    const queue = this.queueManager.getOrCreate(guild.id);
+    if (countHumansInChannel(guild) === 0) return;
+    if (queue.connection) return;
+    queue.clearAutoJoinTimer();
+    this._scheduleAutoJoin(guild, queue, 2000);
+  }
+
+  /**
    * @param {import('discord.js').Guild} guild
    * @param {import('./musicQueue').GuildMusicQueue} queue
+   * @param {number} [delayMs]
    */
-  _scheduleAutoJoin(guild, queue) {
-    const delayMs = config.playback.autoJoinDelayMs;
+  _scheduleAutoJoin(guild, queue, delayMs = config.playback.autoJoinDelayMs) {
     logger.info('auto_join_timer_started', { guildId: guild.id, delayMs });
 
     queue.autoJoinTimer = setTimeout(async () => {
@@ -84,11 +94,31 @@ class AutoJoinLeaveManager {
         logger.info('auto_join_aborted_channel_empty', { guildId: guild.id });
         return;
       }
+      if (!isAcceptingCommands()) {
+        logger.info('auto_join_aborted_shutting_down', { guildId: guild.id });
+        return;
+      }
       try {
         logger.info('auto_join_triggered', { guildId: guild.id });
         await this.playbackService.start(guild);
+        queue.autoJoinAttempts = 0;
       } catch (err) {
         logger.error('auto_join_failed', err, { guildId: guild.id });
+        queue.autoJoinAttempts = (queue.autoJoinAttempts || 0) + 1;
+        if (
+          !(err instanceof PermanentError || err?.permanent) &&
+          queue.autoJoinAttempts < 3 &&
+          countHumansInChannel(guild) > 0 &&
+          isAcceptingCommands()
+        ) {
+          const retryDelayMs = 1000 * 2 ** (queue.autoJoinAttempts - 1);
+          logger.warn('auto_join_retry_scheduled', {
+            guildId: guild.id,
+            attempt: queue.autoJoinAttempts,
+            retryDelayMs,
+          });
+          this._scheduleAutoJoin(guild, queue, retryDelayMs);
+        }
       }
     }, delayMs);
   }
@@ -109,7 +139,11 @@ class AutoJoinLeaveManager {
         return;
       }
       logger.info('auto_leave_triggered', { guildId: guild.id });
-      this.voiceManager.leave(guild.id, 'auto_leave_no_humans');
+      try {
+        this.voiceManager.leave(guild.id, 'auto_leave_no_humans');
+      } catch (err) {
+        logger.error('auto_leave_failed', err, { guildId: guild.id });
+      }
     }, delayMs);
   }
 }

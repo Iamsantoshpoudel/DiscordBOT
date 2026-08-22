@@ -2,6 +2,7 @@
 
 const { SlashCommandBuilder } = require('discord.js');
 const { successEmbed, errorEmbed } = require('../utils/embeds');
+const { escapeMarkdown } = require('../utils/sanitize');
 
 module.exports = {
   requiresVoiceMembership: true,
@@ -24,7 +25,7 @@ module.exports = {
     const ok = ctx.playbackService.pause(interaction.guild.id);
     await interaction.reply({
       embeds: ok
-        ? [successEmbed('Paused', `**${queue.nowPlaying.song.title}** is paused.`)]
+        ? [successEmbed('Paused', `**${escapeMarkdown(queue.nowPlaying.song.title)}** is paused.`)]
         : [errorEmbed('Could not pause', 'Something went wrong pausing playback.')],
     });
   },

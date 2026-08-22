@@ -22,6 +22,7 @@ create table if not exists public.songs (
 );
 
 create index if not exists songs_is_active_idx on public.songs (is_active);
+create index if not exists songs_active_bucket_title_idx on public.songs (bucket_name, is_active, title);
 create index if not exists songs_title_idx on public.songs using gin (to_tsvector('simple', title));
 create index if not exists songs_artist_idx on public.songs using gin (to_tsvector('simple', artist));
 
@@ -46,13 +47,13 @@ create index if not exists play_history_guild_idx on public.play_history (guild_
 alter table public.songs enable row level security;
 alter table public.play_history enable row level security;
 
-drop policy if exists "songs_read_active_public" on public.songs;
-create policy "songs_read_active_public"
-  on public.songs for select
-  using (is_active = true);
+revoke all on table public.songs from anon, authenticated;
+revoke all on table public.play_history from anon, authenticated;
 
--- No insert/update/delete policies are defined for the anon role, so only
--- the service role (used exclusively by the bot's backend) can modify data.
+-- Drop any previously published catalog-read policy. With RLS enabled and
+-- no SELECT policy, anon/authenticated cannot read songs or play_history.
+-- The Discord bot uses the service role key (bypasses RLS).
+drop policy if exists "songs_read_active_public" on public.songs;
 
 -- ----------------------------------------------------------------------------
 -- Storage bucket: create a bucket named "discord" (or match SUPABASE_BUCKET_NAME)
@@ -61,7 +62,27 @@ create policy "songs_read_active_public"
 -- ----------------------------------------------------------------------------
 insert into storage.buckets (id, name, public)
 values ('discord', 'discord', false)
-on conflict (id) do nothing;
+on conflict (id) do update set public = false;
+
+-- Storage RLS is enabled by default on storage.objects. Explicitly deny
+-- anon/authenticated access to this bucket so objects cannot be listed,
+-- uploaded, or overwritten with the public/anon key. The service role
+-- bypasses RLS and remains the only writer/reader used by the bot.
+drop policy if exists "discord_bucket_no_anon_select" on storage.objects;
+drop policy if exists "discord_bucket_no_anon_insert" on storage.objects;
+drop policy if exists "discord_bucket_no_anon_update" on storage.objects;
+drop policy if exists "discord_bucket_no_anon_delete" on storage.objects;
+drop policy if exists "discord_bucket_restrict_anon" on storage.objects;
+
+-- RESTRICTIVE policies are AND'd with any other (permissive) policies, so
+-- they deny the discord bucket without accidentally granting other buckets.
+create policy "discord_bucket_restrict_anon"
+  on storage.objects
+  as restrictive
+  for all
+  to anon, authenticated
+  using (bucket_id <> 'discord')
+  with check (bucket_id <> 'discord');
 
 -- ----------------------------------------------------------------------------
 -- Auto-detection: you do NOT need to manually insert a row for every song.

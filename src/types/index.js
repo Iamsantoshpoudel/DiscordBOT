@@ -37,6 +37,8 @@
  * @property {import('../services/supabaseService')} supabaseService
  * @property {import('../services/voiceManager')} voiceManager
  * @property {import('../services/playbackService')} playbackService
+ * @property {import('../services/autoJoinLeaveManager')} autoJoinLeaveManager
+ * @property {import('discord.js').Collection<string, SlashCommandModule>} commands
  * @property {import('../utils/logger')} logger
  */
 

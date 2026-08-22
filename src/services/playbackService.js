@@ -5,10 +5,13 @@ const ffmpegPath = require('ffmpeg-static');
 const { createAudioResource, StreamType, AudioPlayerStatus } = require('@discordjs/voice');
 
 const supabaseService = require('./supabaseService');
-const { retry } = require('../utils/retry');
 const logger = require('../utils/logger').child('playbackService');
+const supervisor = require('../utils/supervisor');
+const { isTrustedSignedUrl, isValidSongRecord } = require('../utils/sanitize');
+const config = require('../config/config');
+const { isAcceptingCommands } = require('../utils/health');
+const { PermanentError } = require('../utils/retry');
 
-// prism-media resolves the ffmpeg binary via this env var when set.
 process.env.FFMPEG_PATH = process.env.FFMPEG_PATH || ffmpegPath;
 
 const MAX_TRACK_RETRIES = 2;
@@ -25,6 +28,12 @@ class PlaybackService {
     this._listenersAttached = new Set();
     /** @type {Map<string, number>} guildId -> retry count for the current track. */
     this._trackRetryCounts = new Map();
+    /** @type {Map<string, number>} consecutive hard failures (skip after retries). */
+    this._consecutiveTrackFailures = new Map();
+    /** @type {Map<string, Promise<void>>} serializes playNext per guild. */
+    this._playLocks = new Map();
+    /** @type {Set<string>} re-entrancy for the per-guild play lock. */
+    this._inPlayLock = new Set();
   }
 
   /**
@@ -33,13 +42,63 @@ class PlaybackService {
    * @param {import('discord.js').Guild} guild
    */
   async start(guild) {
-    const { player } = this.voiceManager.joinConfiguredChannel(guild);
-    await this.voiceManager.waitUntilReady(this.voiceManager.queueManager.getOrCreate(guild.id).connection);
-    this._ensureListeners(guild, player);
+    if (!isAcceptingCommands()) {
+      throw new PermanentError('Bot is shutting down', 'SHUTTING_DOWN');
+    }
+    try {
+      const { player, connection } = this.voiceManager.joinConfiguredChannel(guild);
+      await this.voiceManager.waitUntilReady(connection);
+      this._ensureListeners(guild, player);
 
-    const queue = this.queueManager.getOrCreate(guild.id);
-    if (queue.state !== 'playing' && !queue.nowPlaying) {
-      await this.playNext(guild);
+      const queue = this.queueManager.getOrCreate(guild.id);
+      if (queue.state !== 'playing' && !queue.nowPlaying) {
+        await this.playNext(guild);
+      }
+      supervisor.reportSuccess('voice');
+      supervisor.reportSuccess('queue');
+    } catch (err) {
+      logger.error('playback_start_failed', err, { guildId: guild.id });
+      supervisor.reportFailure('voice', err, { guildId: guild.id });
+      throw err;
+    }
+  }
+
+  /**
+   * Drop player-listener bookkeeping so a later re-join attaches to the new player.
+   * @param {string} guildId
+   */
+  detachGuild(guildId) {
+    this._listenersAttached.delete(guildId);
+    this._trackRetryCounts.delete(guildId);
+    this._consecutiveTrackFailures.delete(guildId);
+    this._playLocks.delete(guildId);
+    this._inPlayLock.delete(guildId);
+  }
+
+  /**
+   * Serializes playback mutations for a guild. Re-entrant so _playTrack
+   * failure recovery can run while playNext already holds the lock.
+   * @param {string} guildId
+   * @param {() => Promise<unknown>} fn
+   */
+  async _withPlayLock(guildId, fn) {
+    if (this._inPlayLock.has(guildId)) {
+      return fn();
+    }
+
+    const prev = this._playLocks.get(guildId) || Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    this._playLocks.set(guildId, prev.then(() => gate, () => gate));
+    await prev.catch(() => {});
+    this._inPlayLock.add(guildId);
+    try {
+      return await fn();
+    } finally {
+      this._inPlayLock.delete(guildId);
+      release();
     }
   }
 
@@ -55,17 +114,26 @@ class PlaybackService {
     this._listenersAttached.add(guild.id);
 
     player.on(AudioPlayerStatus.Idle, () => {
+      if (!isAcceptingCommands()) return;
+      if (this._circuitOpen(guild.id)) return;
       const queue = this.queueManager.get(guild.id);
-      if (queue) queue.state = 'idle';
+      if (queue) {
+        queue.destroyCurrentStream();
+        queue.state = 'idle';
+      }
       this.playNext(guild).catch((err) => {
         logger.error('auto_advance_failed', err, { guildId: guild.id });
+        supervisor.reportFailure('queue', err, { guildId: guild.id });
       });
     });
 
     player.on('error', (err) => {
       logger.error('audio_player_error', err, { guildId: guild.id });
+      const queue = this.queueManager.get(guild.id);
+      queue?.destroyCurrentStream();
       this._handleTrackFailure(guild).catch((advanceErr) => {
         logger.error('track_failure_recovery_failed', advanceErr, { guildId: guild.id });
+        supervisor.reportFailure('queue', advanceErr, { guildId: guild.id });
       });
     });
   }
@@ -78,8 +146,13 @@ class PlaybackService {
    * @param {import('discord.js').Guild} guild
    */
   async _handleTrackFailure(guild) {
+    return this._withPlayLock(guild.id, () => this._handleTrackFailureExclusive(guild));
+  }
+
+  /** @param {import('discord.js').Guild} guild */
+  async _handleTrackFailureExclusive(guild) {
     const queue = this.queueManager.get(guild.id);
-    if (!queue?.nowPlaying) return this.playNext(guild);
+    if (!queue?.nowPlaying) return this._playNextExclusive(guild);
 
     const failedTrack = queue.nowPlaying;
     const retryCount = this._trackRetryCounts.get(guild.id) || 0;
@@ -92,7 +165,43 @@ class PlaybackService {
 
     logger.warn('track_skipped_after_failures', { guildId: guild.id, songId: failedTrack.song.id });
     this._trackRetryCounts.delete(guild.id);
-    return this.playNext(guild);
+    this._bumpConsecutiveFailures(guild.id);
+    if (this._circuitOpen(guild.id)) {
+      return this._haltPlayback(guild, 'consecutive_track_failures');
+    }
+    return this._playNextExclusive(guild);
+  }
+
+  /** @param {string} guildId */
+  _bumpConsecutiveFailures(guildId) {
+    this._consecutiveTrackFailures.set(guildId, (this._consecutiveTrackFailures.get(guildId) || 0) + 1);
+  }
+
+  /** @param {string} guildId */
+  _circuitOpen(guildId) {
+    return (this._consecutiveTrackFailures.get(guildId) || 0) >= config.playback.maxConsecutiveTrackFailures;
+  }
+
+  /**
+   * Stops refill loops when the whole library (or ffmpeg) is broken.
+   * @param {import('discord.js').Guild} guild
+   * @param {string} reason
+   */
+  _haltPlayback(guild, reason) {
+    const count = this._consecutiveTrackFailures.get(guild.id) || 0;
+    logger.critical(
+      'playback_circuit_open',
+      new Error(reason),
+      { guildId: guild.id, consecutiveFailures: count },
+      'Stopped advancing the queue after repeated track failures',
+    );
+    const queue = this.queueManager.get(guild.id);
+    queue?.destroyCurrentStream();
+    if (queue) {
+      queue.state = 'idle';
+      queue.nowPlaying = null;
+    }
+    supervisor.reportFailure('queue', new Error(reason), { guildId: guild.id, force: true });
   }
 
   /**
@@ -102,33 +211,49 @@ class PlaybackService {
    * @param {import('discord.js').Guild} guild
    */
   async playNext(guild) {
+    return this._withPlayLock(guild.id, () => this._playNextExclusive(guild));
+  }
+
+  /**
+   * @param {import('discord.js').Guild} guild
+   */
+  async _playNextExclusive(guild) {
+    if (!isAcceptingCommands()) return;
+    if (this._circuitOpen(guild.id)) {
+      return this._haltPlayback(guild, 'consecutive_track_failures');
+    }
+
     const queue = this.queueManager.getOrCreate(guild.id);
     this._trackRetryCounts.delete(guild.id);
+    queue.destroyCurrentStream();
 
-    if (queue.isEmpty()) {
-      // getAllActiveSongs() rescans the Storage bucket first (best-effort),
-      // so any file uploaded since the last refill enters rotation here
-      // automatically — no manual database entry required.
-      const songs = await supabaseService.getAllActiveSongs();
-      if (!songs || songs.length === 0) {
-        logger.warn('library_empty', {
-          guildId: guild.id,
-          hint: 'Upload an audio file (.mp3, .wav, .ogg, .m4a, .flac, .aac) to the Storage bucket and it will be picked up automatically.',
-        });
+    try {
+      if (queue.isEmpty()) {
+        const songs = await supabaseService.getAllActiveSongs();
+        if (!songs || songs.length === 0) {
+          logger.warn('library_empty', {
+            guildId: guild.id,
+            hint: 'Upload an audio file (.mp3, .wav, .ogg, .m4a, .flac, .aac) to the Storage bucket and it will be picked up automatically.',
+          });
+          queue.state = 'idle';
+          queue.nowPlaying = null;
+          return;
+        }
+        queue.fillFromLibrary(songs);
+      }
+
+      const track = queue.advance();
+      if (!track) {
         queue.state = 'idle';
-        queue.nowPlaying = null;
         return;
       }
-      queue.fillFromLibrary(songs);
-    }
 
-    const track = queue.advance();
-    if (!track) {
-      queue.state = 'idle';
-      return;
+      await this._playTrack(guild, track);
+      supervisor.reportSuccess('queue');
+    } catch (err) {
+      logger.error('play_next_failed', err, { guildId: guild.id });
+      supervisor.reportFailure('queue', err, { guildId: guild.id });
     }
-
-    await this._playTrack(guild, track);
   }
 
   /**
@@ -141,32 +266,58 @@ class PlaybackService {
   async _playTrack(guild, track) {
     const queue = this.queueManager.getOrCreate(guild.id);
 
-    try {
-      const signedUrl = await retry(() => supabaseService.getSignedStreamUrl(track.song), {
-        retries: 2,
-        baseDelayMs: 500,
-        onRetry: (err, attempt, delay) =>
-          logger.warn('signed_url_retry', { guildId: guild.id, songId: track.song.id, attempt, delay, error: err.message }),
-      });
+    if (!isValidSongRecord(track.song, config.supabase.bucketName)) {
+      logger.warn('skipping_untrusted_song', { guildId: guild.id, songId: track.song?.id });
+      this._bumpConsecutiveFailures(guild.id);
+      if (this._circuitOpen(guild.id)) {
+        return this._haltPlayback(guild, 'consecutive_track_failures');
+      }
+      return this._playNextExclusive(guild);
+    }
 
-      const resource = this._buildStreamingResource(signedUrl);
+    try {
+      if (!ffmpegPath) {
+        throw new PermanentError('ffmpeg-static binary is missing; cannot transcode audio.', 'FFMPEG_MISSING');
+      }
+
+      const signedUrl = await supabaseService.getSignedStreamUrl(track.song);
+
+      if (!isTrustedSignedUrl(signedUrl, config.supabase.url)) {
+        throw new PermanentError('Refusing to stream from untrusted signed URL host', 'UNTRUSTED_URL');
+      }
+
+      queue.destroyCurrentStream();
+      const resource = this._buildStreamingResource(queue, signedUrl);
       resource.volume?.setVolume(queue.volume);
-      queue.currentResource = resource;
       queue.nowPlaying = track;
       queue.state = 'playing';
 
+      if (!queue.player) {
+        throw new Error('No audio player attached for this guild');
+      }
       queue.player.play(resource);
+      this._consecutiveTrackFailures.set(guild.id, 0);
 
       logger.info(
         'track_started',
-        { guildId: guild.id, songId: track.song.id, title: track.song.title, artist: track.song.artist, requestedBy: track.requestedBy },
+        {
+          guildId: guild.id,
+          songId: track.song.id,
+          title: track.song.title,
+          artist: track.song.artist,
+          requestedBy: track.requestedBy,
+        },
         `🎵 Now playing: "${track.song.title}" by ${track.song.artist}`,
       );
 
       supabaseService.logPlayHistory(guild.id, track.song).catch(() => {});
     } catch (err) {
       logger.error('play_track_failed', err, { guildId: guild.id, songId: track.song.id });
-      await this._handleTrackFailure(guild);
+      queue.destroyCurrentStream();
+      if (err instanceof PermanentError || err?.permanent) {
+        return this._haltPlayback(guild, err.code || 'permanent_play_failure');
+      }
+      await this._handleTrackFailureExclusive(guild);
     }
   }
 
@@ -176,16 +327,19 @@ class PlaybackService {
    * transcoded PCM into an Opus encoder to build a Discord-ready
    * AudioResource. ffmpeg's own `-reconnect` flags add transient-network
    * resilience at the stream level.
+   * @param {import('./musicQueue').GuildMusicQueue} queue
    * @param {string} sourceUrl
    * @returns {import('@discordjs/voice').AudioResource}
    */
-  _buildStreamingResource(sourceUrl) {
+  _buildStreamingResource(queue, sourceUrl) {
     const ffmpegArgs = [
       '-reconnect', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
+      '-protocol_whitelist', 'http,https,tcp,tls,crypto',
       '-analyzeduration', '0',
-      '-loglevel', '0',
+      '-loglevel', 'error',
+      '-nostdin',
       '-i', sourceUrl,
       '-f', 's16le',
       '-ar', '48000',
@@ -197,15 +351,26 @@ class PlaybackService {
 
     const pcmStream = ffmpegProcess.pipe(opusEncoder);
 
-    ffmpegProcess.process?.once?.('error', (err) => {
-      logger.error('ffmpeg_process_error', err);
-    });
-    ffmpegProcess.once('error', (err) => {
-      logger.error('ffmpeg_stream_error', err);
-      pcmStream.destroy(err);
-    });
+    queue.currentFfmpeg = ffmpegProcess;
+    queue.currentOpus = opusEncoder;
 
-    return createAudioResource(pcmStream, { inputType: StreamType.Opus, inlineVolume: true });
+    const fail = (err) => {
+      logger.error('ffmpeg_stream_error', err);
+      try {
+        pcmStream.destroy(err);
+      } catch {
+        /* ignore */
+      }
+      queue.destroyCurrentStream();
+    };
+
+    ffmpegProcess.process?.once?.('error', fail);
+    ffmpegProcess.once('error', fail);
+    opusEncoder.once('error', fail);
+
+    const resource = createAudioResource(pcmStream, { inputType: StreamType.Opus, inlineVolume: true });
+    queue.currentResource = resource;
+    return resource;
   }
 
   /** @param {string} guildId */

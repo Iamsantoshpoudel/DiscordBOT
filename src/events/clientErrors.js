@@ -34,6 +34,29 @@ function registerClientErrorHandlers(client) {
   client.on(Events.ShardResume, (shardId, replayedEvents) => {
     logger.info('discord_shard_resumed', { shardId, replayedEvents });
   });
+
+  client.on(Events.Invalidated, () => {
+    logger.critical(
+      'discord_session_invalidated',
+      new Error('Discord session invalidated — token was reset or the gateway rejected the session'),
+    );
+    process.exitCode = 1;
+    process.emit('SIGTERM');
+  });
+
+  try {
+    client.rest.on('rateLimited', (info) => {
+      logger.warn('discord_rate_limited', {
+        timeout: info.timeToReset ?? info.timeout,
+        limit: info.limit,
+        method: info.method,
+        url: info.url ?? info.route,
+        global: info.global,
+      });
+    });
+  } catch (err) {
+    logger.warn('rate_limit_listener_unavailable', { error: err.message });
+  }
 }
 
 module.exports = { registerClientErrorHandlers };

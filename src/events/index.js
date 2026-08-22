@@ -25,7 +25,13 @@ function registerEvents(client, ctx) {
         continue;
       }
 
-      const handler = (...args) => event.execute(...args, ctx);
+      const handler = async (...args) => {
+        try {
+          await event.execute(...args, ctx);
+        } catch (err) {
+          logger.error('event_handler_failed', err, { event: event.name, file });
+        }
+      };
       if (event.once) {
         client.once(event.name, handler);
       } else {

@@ -50,8 +50,20 @@ class GuildMusicQueue {
     /** @type {import('@discordjs/voice').AudioPlayer|null} */
     this.player = null;
 
+    /** @type {import('@discordjs/voice').AudioResource|null} */
+    this.currentResource = null;
+
+    /** @type {import('prism-media').FFmpeg|null} */
+    this.currentFfmpeg = null;
+
+    /** @type {import('stream').Readable|null} */
+    this.currentOpus = null;
+
     /** @type {NodeJS.Timeout|null} Pending auto-join timer; only one may be active at a time. */
     this.autoJoinTimer = null;
+
+    /** @type {number} Transient auto-join failures in the current occupancy window. */
+    this.autoJoinAttempts = 0;
 
     /** @type {NodeJS.Timeout|null} Pending auto-leave timer. */
     this.autoLeaveTimer = null;
@@ -80,16 +92,19 @@ class GuildMusicQueue {
       [shuffled[0], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[0]];
     }
 
-    this.upcoming = shuffled.map((song) => ({ song, requestedBy }));
+    this.upcoming = shuffled.map((song) => ({ song, requestedBy })).slice(0, config.playback.maxQueueLength);
   }
 
   /**
    * Inserts a specific track at the front of the queue (used by `/play <query>`).
    * @param {SongRecord} song
    * @param {string} requestedBy
+   * @returns {boolean} false if the queue is already at the cap
    */
   playNext(song, requestedBy) {
+    if (this.upcoming.length >= config.playback.maxQueueLength) return false;
     this.upcoming.unshift({ song, requestedBy });
+    return true;
   }
 
   /**
@@ -143,14 +158,52 @@ class GuildMusicQueue {
     }
   }
 
+  destroyCurrentStream() {
+    try {
+      this.currentResource?.playStream?.destroy?.();
+    } catch {
+      /* ignore */
+    }
+    try {
+      const proc = this.currentFfmpeg?.process;
+      if (proc && !proc.killed) {
+        proc.kill('SIGKILL');
+      }
+    } catch {
+      try {
+        this.currentFfmpeg?.process?.kill?.();
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      this.currentFfmpeg?.removeAllListeners?.();
+      this.currentFfmpeg?.destroy?.();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.currentOpus?.removeAllListeners?.();
+      this.currentOpus?.destroy?.();
+    } catch {
+      /* ignore */
+    }
+    this.currentResource = null;
+    this.currentFfmpeg = null;
+    this.currentOpus = null;
+  }
+
   /** Resets playback state after the bot leaves the channel. */
   resetPlaybackState() {
+    this.destroyCurrentStream();
     this.nowPlaying = null;
     this.state = 'idle';
     this.connection = null;
     this.player = null;
     this.startedAt = null;
+    this.clearAutoJoinTimer();
     this.clearAutoLeaveTimer();
+    this.autoJoinAttempts = 0;
   }
 }
 
@@ -183,6 +236,10 @@ class QueueManager {
 
   /** @param {string} guildId */
   delete(guildId) {
+    const queue = this.queues.get(guildId);
+    if (queue) {
+      queue.resetPlaybackState();
+    }
     this.queues.delete(guildId);
   }
 }
