@@ -1,0 +1,49 @@
+services:
+  - type: worker
+    name: discord-music-bot
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    buildCommand: npm ci
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: DISCORD_DEV_GUILD_ID
+        sync: false
+      - key: VOICE_CHANNEL_ID
+        sync: false
+      - key: CATEGORY_ID
+        sync: false
+      - key: ALLOWED_ROLE_IDS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET_NAME
+        value: discord
+      - key: SUPABASE_SONGS_TABLE
+        value: songs
+      - key: AUTO_JOIN_DELAY_MS
+        value: "30000"
+      - key: AUTO_LEAVE_DELAY_MS
+        value: "30000"
+      - key: DEFAULT_VOLUME
+        value: "0.5"
+      - key: COMMAND_COOLDOWN_MS
+        value: "3000"
+      - key: SIGNED_URL_EXPIRY_SECONDS
+        value: "3600"
+      - key: LIBRARY_SYNC_INTERVAL_MS
+        value: "120000"
+      - key: LOG_LEVEL
+        value: info
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 20.16.0
