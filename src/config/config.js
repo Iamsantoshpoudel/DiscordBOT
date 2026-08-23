@@ -118,6 +118,10 @@ const config = Object.freeze({
     maxVoiceConnections: parseIntSafe(process.env.MAX_VOICE_CONNECTIONS, 5),
     maxFileSizeBytes: parseIntSafe(process.env.MAX_FILE_SIZE_BYTES, 50 * 1024 * 1024),
     maxConsecutiveTrackFailures: parseIntSafe(process.env.MAX_CONSECUTIVE_TRACK_FAILURES, 5),
+    // If the player reaches "Playing" but drops back to Idle faster than
+    // this, treat it as a stream failure (bad/empty signed URL response,
+    // network issue, etc.) instead of a normal track completion.
+    minPlaybackMs: parseIntSafe(process.env.MIN_PLAYBACK_MS, 3000),
   }),
   ops: Object.freeze({
     logLevel: process.env.LOG_LEVEL || 'info',

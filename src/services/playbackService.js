@@ -43,6 +43,8 @@ class PlaybackService {
     this._inPlayLock = new Set();
     /** @type {Map<string, number>} nested suppress count while swapping ffmpeg/resources. */
     this._suppressAutoAdvance = new Map();
+    /** @type {Map<string, number>} guildId -> Date.now() when the player last entered Playing. */
+    this._playbackStartTimes = new Map();
   }
 
   _beginSuppress(guildId) {
@@ -97,6 +99,7 @@ class PlaybackService {
     this._playLocks.delete(guildId);
     this._inPlayLock.delete(guildId);
     this._suppressAutoAdvance.delete(guildId);
+    this._playbackStartTimes.delete(guildId);
   }
 
   /**
@@ -145,6 +148,7 @@ class PlaybackService {
       if (newState.status !== AudioPlayerStatus.Idle) {
         if (newState.status === AudioPlayerStatus.Playing) {
           this._consecutiveTrackFailures.set(guild.id, 0);
+          this._playbackStartTimes.set(guild.id, Date.now());
         }
         return;
       }
@@ -159,6 +163,31 @@ class PlaybackService {
         oldState.status === AudioPlayerStatus.Playing || oldState.status === AudioPlayerStatus.Paused;
 
       if (cameFromPlayback) {
+        const startedAt = this._playbackStartTimes.get(guild.id);
+        const elapsedMs = startedAt ? Date.now() - startedAt : Infinity;
+
+        if (elapsedMs < config.playback.minPlaybackMs) {
+          // The player reached "Playing" but died almost immediately. This
+          // is almost never a real track finishing (songs aren't ~1s long)
+          // — it's a stream failure: an empty/invalid response from the
+          // signed URL, a network blip, or a corrupt file. Route it
+          // through the same retry/circuit-breaker path as other
+          // failures instead of silently advancing, so it's visible in
+          // logs and doesn't burn through the whole queue in seconds.
+          logger.warn('track_died_too_fast', {
+            guildId: guild.id,
+            songId: queue?.nowPlaying?.song?.id,
+            title: queue?.nowPlaying?.song?.title,
+            elapsedMs,
+            thresholdMs: config.playback.minPlaybackMs,
+          });
+          this._handleTrackFailure(guild).catch((advanceErr) => {
+            logger.error('track_failure_recovery_failed', advanceErr, { guildId: guild.id });
+            supervisor.reportFailure('queue', advanceErr, { guildId: guild.id });
+          });
+          return;
+        }
+
         if (queue) queue.state = 'idle';
         this.playNext(guild).catch((err) => {
           logger.error('auto_advance_failed', err, { guildId: guild.id });
@@ -417,15 +446,34 @@ class PlaybackService {
     queue.currentFfmpeg = ffmpegProcess;
     queue.currentOpus = null;
 
+    // Minimum output required before we consider the stream to have
+    // produced "real" audio. 48000Hz * 2ch * 2 bytes/sample * 0.25s of PCM
+    // is a generous floor — anything below this on close almost certainly
+    // means the source (signed URL) never actually returned playable
+    // audio, even if ffmpeg happened to exit with code 0.
+    const MIN_OUTPUT_BYTES = 48000 * 2 * 2 * 0.25;
+    let outputBytes = 0;
+    ffmpegProcess.on('data', (chunk) => {
+      outputBytes += chunk.length;
+    });
+
     const stderrChunks = [];
     ffmpegProcess.process?.stderr?.on('data', (chunk) => {
       stderrChunks.push(chunk);
       if (stderrChunks.length > 8) stderrChunks.shift();
     });
     ffmpegProcess.process?.once?.('close', (code, signal) => {
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').slice(-400);
       if (code && code !== 0 && signal !== 'SIGKILL' && signal !== 'SIGTERM') {
-        const stderr = Buffer.concat(stderrChunks).toString('utf8').slice(-400);
-        logger.warn('ffmpeg_exit', { code, signal, stderr });
+        logger.warn('ffmpeg_exit', { code, signal, stderr, outputBytes });
+      } else if (signal !== 'SIGKILL' && signal !== 'SIGTERM' && outputBytes < MIN_OUTPUT_BYTES) {
+        // Clean exit, but effectively no audio was produced — the source
+        // (signed URL) almost certainly returned an empty/invalid
+        // response instead of real audio. This is the case that used to
+        // slip through silently and look like a normal track completion.
+        logger.warn('ffmpeg_produced_no_audio', {
+          code, signal, outputBytes, minExpectedBytes: MIN_OUTPUT_BYTES, sourceUrl: '[redacted]', stderr,
+        });
       }
     });
 
