@@ -2,7 +2,7 @@
 
 const prism = require('prism-media');
 const ffmpegPath = require('ffmpeg-static');
-const { createAudioResource, StreamType, AudioPlayerStatus } = require('@discordjs/voice');
+const { createAudioResource, StreamType, AudioPlayerStatus, entersState } = require('@discordjs/voice');
 
 const supabaseService = require('./supabaseService');
 const logger = require('../utils/logger').child('playbackService');
@@ -13,6 +13,13 @@ const { isAcceptingCommands } = require('../utils/health');
 const { PermanentError } = require('../utils/retry');
 
 process.env.FFMPEG_PATH = process.env.FFMPEG_PATH || ffmpegPath;
+process.env.FFMPEG_BIN = process.env.FFMPEG_BIN || ffmpegPath;
+
+if (ffmpegPath) {
+  logger.info('ffmpeg_binary', { path: ffmpegPath });
+} else {
+  logger.error('ffmpeg_binary_missing', new Error('ffmpeg-static returned no path'));
+}
 
 const MAX_TRACK_RETRIES = 2;
 
@@ -34,6 +41,22 @@ class PlaybackService {
     this._playLocks = new Map();
     /** @type {Set<string>} re-entrancy for the per-guild play lock. */
     this._inPlayLock = new Set();
+    /** @type {Map<string, number>} nested suppress count while swapping ffmpeg/resources. */
+    this._suppressAutoAdvance = new Map();
+  }
+
+  _beginSuppress(guildId) {
+    this._suppressAutoAdvance.set(guildId, (this._suppressAutoAdvance.get(guildId) || 0) + 1);
+  }
+
+  _endSuppress(guildId) {
+    const next = (this._suppressAutoAdvance.get(guildId) || 1) - 1;
+    if (next <= 0) this._suppressAutoAdvance.delete(guildId);
+    else this._suppressAutoAdvance.set(guildId, next);
+  }
+
+  _isSuppressed(guildId) {
+    return (this._suppressAutoAdvance.get(guildId) || 0) > 0;
   }
 
   /**
@@ -73,6 +96,7 @@ class PlaybackService {
     this._consecutiveTrackFailures.delete(guildId);
     this._playLocks.delete(guildId);
     this._inPlayLock.delete(guildId);
+    this._suppressAutoAdvance.delete(guildId);
   }
 
   /**
@@ -104,8 +128,12 @@ class PlaybackService {
 
   /**
    * Attaches AudioPlayer event listeners exactly once per guild's player
-   * lifetime. `idle` means the current resource finished -> advance the
-   * queue. `error` means the stream broke mid-playback -> retry or skip.
+   * lifetime.
+   *
+   * Important: do NOT treat every Idle as "track finished". On Render, ffmpeg
+   * often fails during Buffering; Idle then used to call playNext and skip
+   * the whole library in seconds. Also, destroying the previous ffmpeg
+   * process emits Idle — that must not start another track.
    * @param {import('discord.js').Guild} guild
    * @param {import('@discordjs/voice').AudioPlayer} player
    */
@@ -113,22 +141,46 @@ class PlaybackService {
     if (this._listenersAttached.has(guild.id)) return;
     this._listenersAttached.add(guild.id);
 
-    player.on(AudioPlayerStatus.Idle, () => {
+    player.on('stateChange', (oldState, newState) => {
+      if (newState.status !== AudioPlayerStatus.Idle) {
+        if (newState.status === AudioPlayerStatus.Playing) {
+          this._consecutiveTrackFailures.set(guild.id, 0);
+        }
+        return;
+      }
       if (!isAcceptingCommands()) return;
       if (this._circuitOpen(guild.id)) return;
+      if (this._isSuppressed(guild.id)) return;
+
       const queue = this.queueManager.get(guild.id);
-      if (queue) {
-        queue.destroyCurrentStream();
-        queue.state = 'idle';
+      queue?.destroyCurrentStream();
+
+      const cameFromPlayback =
+        oldState.status === AudioPlayerStatus.Playing || oldState.status === AudioPlayerStatus.Paused;
+
+      if (cameFromPlayback) {
+        if (queue) queue.state = 'idle';
+        this.playNext(guild).catch((err) => {
+          logger.error('auto_advance_failed', err, { guildId: guild.id });
+          supervisor.reportFailure('queue', err, { guildId: guild.id });
+        });
+        return;
       }
-      this.playNext(guild).catch((err) => {
-        logger.error('auto_advance_failed', err, { guildId: guild.id });
-        supervisor.reportFailure('queue', err, { guildId: guild.id });
+
+      // Buffering → Idle (or AutoPaused → Idle): stream never started.
+      logger.warn('track_failed_before_playing', {
+        guildId: guild.id,
+        from: oldState.status,
+      });
+      this._handleTrackFailure(guild).catch((advanceErr) => {
+        logger.error('track_failure_recovery_failed', advanceErr, { guildId: guild.id });
+        supervisor.reportFailure('queue', advanceErr, { guildId: guild.id });
       });
     });
 
     player.on('error', (err) => {
       logger.error('audio_player_error', err, { guildId: guild.id });
+      if (this._isSuppressed(guild.id)) return;
       const queue = this.queueManager.get(guild.id);
       queue?.destroyCurrentStream();
       this._handleTrackFailure(guild).catch((advanceErr) => {
@@ -160,7 +212,12 @@ class PlaybackService {
     if (retryCount < MAX_TRACK_RETRIES) {
       this._trackRetryCounts.set(guild.id, retryCount + 1);
       logger.warn('track_retry', { guildId: guild.id, songId: failedTrack.song.id, attempt: retryCount + 1 });
-      return this._playTrack(guild, failedTrack);
+      this._beginSuppress(guild.id);
+      try {
+        return await this._playTrack(guild, failedTrack);
+      } finally {
+        setImmediate(() => this._endSuppress(guild.id));
+      }
     }
 
     logger.warn('track_skipped_after_failures', { guildId: guild.id, songId: failedTrack.song.id });
@@ -225,6 +282,7 @@ class PlaybackService {
 
     const queue = this.queueManager.getOrCreate(guild.id);
     this._trackRetryCounts.delete(guild.id);
+    this._beginSuppress(guild.id);
     queue.destroyCurrentStream();
 
     try {
@@ -253,6 +311,8 @@ class PlaybackService {
     } catch (err) {
       logger.error('play_next_failed', err, { guildId: guild.id });
       supervisor.reportFailure('queue', err, { guildId: guild.id });
+    } finally {
+      setImmediate(() => this._endSuppress(guild.id));
     }
   }
 
@@ -296,7 +356,12 @@ class PlaybackService {
         throw new Error('No audio player attached for this guild');
       }
       queue.player.play(resource);
-      this._consecutiveTrackFailures.set(guild.id, 0);
+
+      try {
+        await entersState(queue.player, AudioPlayerStatus.Playing, 15_000);
+      } catch {
+        throw new Error('Audio player did not start within 15s (stream may have failed to open)');
+      }
 
       logger.info(
         'track_started',
@@ -336,39 +401,45 @@ class PlaybackService {
       '-reconnect', '1',
       '-reconnect_streamed', '1',
       '-reconnect_delay_max', '5',
-      '-protocol_whitelist', 'http,https,tcp,tls,crypto',
-      '-analyzeduration', '0',
+      '-analyzeduration', '2000000',
+      '-probesize', '1000000',
       '-loglevel', 'error',
       '-nostdin',
       '-i', sourceUrl,
+      '-vn',
       '-f', 's16le',
       '-ar', '48000',
       '-ac', '2',
     ];
 
     const ffmpegProcess = new prism.FFmpeg({ args: ffmpegArgs });
-    const opusEncoder = new prism.opus.Encoder({ rate: 48000, channels: 2, frameSize: 960 });
-
-    const pcmStream = ffmpegProcess.pipe(opusEncoder);
 
     queue.currentFfmpeg = ffmpegProcess;
-    queue.currentOpus = opusEncoder;
+    queue.currentOpus = null;
+
+    const stderrChunks = [];
+    ffmpegProcess.process?.stderr?.on('data', (chunk) => {
+      stderrChunks.push(chunk);
+      if (stderrChunks.length > 8) stderrChunks.shift();
+    });
+    ffmpegProcess.process?.once?.('close', (code, signal) => {
+      if (code && code !== 0 && signal !== 'SIGKILL' && signal !== 'SIGTERM') {
+        const stderr = Buffer.concat(stderrChunks).toString('utf8').slice(-400);
+        logger.warn('ffmpeg_exit', { code, signal, stderr });
+      }
+    });
 
     const fail = (err) => {
       logger.error('ffmpeg_stream_error', err);
-      try {
-        pcmStream.destroy(err);
-      } catch {
-        /* ignore */
-      }
       queue.destroyCurrentStream();
     };
 
     ffmpegProcess.process?.once?.('error', fail);
     ffmpegProcess.once('error', fail);
-    opusEncoder.once('error', fail);
 
-    const resource = createAudioResource(pcmStream, { inputType: StreamType.Opus, inlineVolume: true });
+    // PCM + inlineVolume. Do not pre-encode Opus here — VolumeTransformer expects
+    // s16le, and wrapping Opus with inlineVolume makes the player go Idle immediately.
+    const resource = createAudioResource(ffmpegProcess, { inputType: StreamType.Raw, inlineVolume: true });
     queue.currentResource = resource;
     return resource;
   }
