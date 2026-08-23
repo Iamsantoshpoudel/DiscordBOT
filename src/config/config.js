@@ -125,7 +125,7 @@ const config = Object.freeze({
     logDir,
     heartbeatPath: process.env.HEARTBEAT_PATH || path.join(logDir, 'heartbeat.json'),
     heartbeatIntervalMs: parseIntSafe(process.env.HEARTBEAT_INTERVAL_MS, 15000),
-    metricsIntervalMs: parseIntSafe(process.env.METRICS_INTERVAL_MS, 60_000),
+    metricsIntervalMs: parseIntSafe(process.env.METRICS_INTERVAL_MS, 120_000),
     nodeEnv: process.env.NODE_ENV || 'development',
     port: process.env.PORT ? parseIntSafe(process.env.PORT, null) : null,
     healthPort: process.env.HEALTH_PORT ? parseIntSafe(process.env.HEALTH_PORT, null) : null,
