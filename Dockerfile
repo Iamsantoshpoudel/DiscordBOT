@@ -2,16 +2,18 @@
 # Use with: docker run --env-file .env --restart unless-stopped discord-music-bot
 # Do not also run PM2 inside this container.
 
-FROM node:20.16.0-bookworm-slim
+FROM node:22-bookworm-slim
 
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev \
+  && npm cache clean --force \
+  && rm -rf node_modules/ffmpeg-static
 
 COPY src ./src
 RUN mkdir -p /app/logs && chown -R node:node /app
