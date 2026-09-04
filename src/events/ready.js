@@ -14,7 +14,7 @@ module.exports = {
 
     try {
       client.user.setPresence({
-        activities: [{ name: '/status | streaming from Supabase', type: ActivityType.Listening }],
+        activities: [{ name: 'dexbotx.vercel.app', type: ActivityType.Listening }],
         status: 'online',
       });
     } catch (err) {
