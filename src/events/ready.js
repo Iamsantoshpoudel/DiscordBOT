@@ -14,7 +14,7 @@ module.exports = {
 
     try {
       client.user.setPresence({
-        activities: [{ name: '/status dexbotx.vercel.app', type: ActivityType.Listening }],
+        activities: [{ name: 'https://dexbotx.vercel.app/ | /status', type: ActivityType.Listening }],
         status: 'online',
       });
     } catch (err) {
