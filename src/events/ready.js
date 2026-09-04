@@ -14,11 +14,7 @@ module.exports = {
 
     try {
       client.user.setPresence({
-<<<<<<< Updated upstream
         activities: [{ name: 'dexbotx.vercel.app', type: ActivityType.Listening }],
-=======
-        activities: [{ name: 'https://iamsantoshpoudel.github.io/Bot/', type: ActivityType.Listening }],
->>>>>>> Stashed chang
         status: 'online',
       });
     } catch (err) {
