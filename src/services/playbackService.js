@@ -1,6 +1,7 @@
 'use strict';
 
 const prism = require('prism-media');
+const ffmpegPath = require('ffmpeg-static');
 const { createAudioResource, StreamType, AudioPlayerStatus } = require('@discordjs/voice');
 
 const supabaseService = require('./supabaseService');
@@ -11,13 +12,7 @@ const config = require('../config/config');
 const { isAcceptingCommands } = require('../utils/health');
 const { PermanentError } = require('../utils/retry');
 
-let resolvedFfmpeg;
-try {
-  resolvedFfmpeg = prism.FFmpeg.getInfo();
-  logger.info('ffmpeg_resolved', { command: resolvedFfmpeg.command, version: resolvedFfmpeg.version });
-} catch (err) {
-  throw new PermanentError('No usable ffmpeg/avconv binary found on this system.', 'FFMPEG_MISSING');
-}
+process.env.FFMPEG_PATH = process.env.FFMPEG_PATH || ffmpegPath;
 
 const MAX_TRACK_RETRIES = 2;
 
@@ -281,6 +276,10 @@ class PlaybackService {
     }
 
     try {
+      if (!ffmpegPath) {
+        throw new PermanentError('ffmpeg-static binary is missing; cannot transcode audio.', 'FFMPEG_MISSING');
+      }
+
       const signedUrl = await supabaseService.getSignedStreamUrl(track.song);
 
       if (!isTrustedSignedUrl(signedUrl, config.supabase.url)) {

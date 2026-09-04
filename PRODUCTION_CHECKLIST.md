@@ -85,12 +85,6 @@ healthcheck:
 
 Do not run PM2 inside this image. The container restart policy is the supervisor.
 
-**ffmpeg in this image:** the Dockerfile installs `ffmpeg` via `apt` and
-removes the bundled `node_modules/ffmpeg-static` binary at build time. This is
-required — do not revert it. See "Known issue: resolved" below for why.
-`npm run dev` outside Docker still uses `ffmpeg-static` normally; this only
-affects the container image.
-
 ## Exit codes
 
 | Code | Meaning |
@@ -115,9 +109,6 @@ Copy `.env.example` to `.env`. Required secrets (never commit real values):
 
 The service role key is **server-side only**. It is never sent to Discord
 users or logged in full.
-
-See the main [README](./README.md) for the full variable reference (required
-vs. optional, defaults, and what each one does).
 
 ## Discord least privilege
 
@@ -166,13 +157,10 @@ If you build a public catalog UI later, add a narrow `SELECT` policy on
 | Heartbeat | `logs/heartbeat.json` |
 | HTTP | `GET /health` (liveness), `GET /ready` (Discord session), `GET /metrics` when `PORT` or `HEALTH_PORT` is set |
 | Periodic metrics | log event `metrics_snapshot` (uptime, commands, errors, voice connections) |
-| ffmpeg binary in use | log event `ffmpeg_resolved` at boot (`command`, `version`) — confirm this says `ffmpeg`, not a path containing `ffmpeg-static`, in any Docker/container deploy |
 
 Watch for `controlled_restart`, `subsystem_failure`, `supabase_retry`,
-`voice_connection_unrecoverable`, `playback_circuit_open`,
-`unhandled_rejection`, and `track_failed_before_playing` (see known issue
-below — a burst of these with `elapsedMs` under ~500ms means ffmpeg is
-crashing immediately, not a real playback failure).
+`voice_connection_unrecoverable`, `playback_circuit_open`, and
+`unhandled_rejection`.
 
 ## Operational notes
 
@@ -200,47 +188,6 @@ crashing immediately, not a real playback failure).
   hardening pass. Re-run it before each deploy; `package-lock.json` pins
   transitive versions.
 
-## Known issue: resolved — ffmpeg-static segfault in Docker (auto-shuffle loop)
-
-**Symptom:** in Docker/Render only (never with `npm run dev` locally), the bot
-would join voice and then cycle through the entire library in seconds — logs
-showed a new `"Now playing"` line roughly every 0.5–1s, tagged
-`requestedBy: "auto-shuffle"`, with no crash and no visible error.
-
-**Root cause:** `prism-media`'s internal ffmpeg locator (`FFmpeg.getInfo()`)
-always tries the bundled `ffmpeg-static` binary first, validating it with a
-harmless `<binary> -h` call. That call succeeded in the affected container
-images, so `prism-media` cached `ffmpeg-static` as "the working ffmpeg" and
-never fell back to system ffmpeg. The bundled `ffmpeg-static` binary then
-**segfaulted** the instant it was given a real `https://` input (its TLS code
-path is incompatible with that container environment) — producing
-`elapsedMs` in the ~130ms range and `outputBytes: 0` on every attempt. A
-segfault bypasses Node's normal error handling entirely, so nothing was ever
-logged as an error; the `Idle` handler saw the player go idle almost
-instantly and correctly (but incorrectly, given the real cause) advanced the
-queue, over and over.
-
-Setting `process.env.FFMPEG_PATH` did **not** fix this — `prism-media` never
-reads that variable; it was dead code.
-
-**Fix (already applied in this repo):**
-1. Dockerfile installs system `ffmpeg` via `apt-get`.
-2. Dockerfile removes `node_modules/ffmpeg-static` after `npm ci`, so
-   `prism-media`'s `getInfo()` check on it fails and it correctly falls
-   through to the system `ffmpeg` on `PATH`.
-3. `playbackService.js` now calls `prism.FFmpeg.getInfo()` explicitly at
-   startup and logs `ffmpeg_resolved` with the resolved `command` and
-   `version`, so which binary is actually in use is visible in the boot log
-   going forward instead of assumed silently.
-4. `ffmpeg-static` remains in `package.json` for local development
-   (`npm run dev`) — only the Docker image strips it.
-
-**If this symptom reappears:** check the `ffmpeg_resolved` boot log line
-first. If `command` is anything other than `ffmpeg` (system), that's the bug
-again — confirm the Dockerfile's `rm -rf node_modules/ffmpeg-static` step
-actually ran (rebuild with `--no-cache` if in doubt) and that `ffmpeg` is
-still being installed via `apt`.
-
 ## Decisions already taken (do not re-guess)
 
 - **Process manager:** Render worker is the current deploy target; PM2
@@ -248,9 +195,6 @@ still being installed via `apt`.
 - **Storage:** private bucket + signed URLs (not a public bucket).
 - **Health bind:** loopback for `HEALTH_PORT`, all interfaces when Render
   sets `PORT`. Override with `HEALTH_BIND`.
-- **ffmpeg in Docker:** system `ffmpeg` via `apt`, with `ffmpeg-static`
-  stripped from the image at build time. Do not reintroduce `ffmpeg-static`
-  as the runtime binary in containers — see "Known issue: resolved" above.
 
 ## Vulnerability / crash-risk register
 
@@ -258,7 +202,6 @@ still being installed via `apt`.
 |---|---|---|
 | Critical | Unhandled rejections / uncaught exceptions could kill the process | Global handlers log full context; uncaught still flushes then exits `1` so the process manager restarts cleanly |
 | Critical | Bot token / service role in env only; never hardcoded | Boot fails if required secrets missing; `.env` gitignored; logs redact JWTs and signed-URL tokens |
-| Critical | `ffmpeg-static` segfaults on real playback inside Docker, silently looping the entire queue (see "Known issue: resolved") | System `ffmpeg` installed via apt; `ffmpeg-static` stripped from the Docker image; boot now logs which binary resolved |
 | High | Public storage or anon writes | Bucket forced private; RLS on `songs` / `play_history`; anon/authenticated revoked; signed URLs with expiry |
 | High | ffmpeg could follow redirects to `file://` or unexpected protocols | Stream URL host-checked against `SUPABASE_URL`; `-protocol_whitelist` limited to http(s)/tcp/tls |
 | High | Truncated storage listing marked real songs inactive | Nested listing + skip deactivate when truncated |
